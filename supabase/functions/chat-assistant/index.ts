@@ -18,8 +18,7 @@ serve(async (req) => {
       throw new Error('Message is required');
     }
 
-    const openaiApiKey = Deno.env.get('OPENAI_API_KEY');
-    const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
+    const mistralApiKey = Deno.env.get('MISTRAL_API_KEY');
     const preferProvider = (provider || '').toLowerCase();
 
     // Create context for agricultural assistant with strict response style
@@ -87,86 +86,65 @@ serve(async (req) => {
       // Swallow context errors silently; chat will still work
     }
 
-    // helpers for providers
-    const callOpenAI = async (): Promise<{ ok: boolean; content?: string; status?: number; body?: string; }> => {
-      if (!openaiApiKey) return { ok: false, status: 401, body: 'OPENAI_API_KEY missing' };
-      console.log('Calling OpenAI with message');
-      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openaiApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            ...(Array.isArray(history) ? history : []),
-            { role: 'user', content: `${weatherSummary}\n${marketSummary}\n\nUser: ${message}` }
-          ],
+    // helper for Mistral AI provider
+    const callMistral = async (): Promise<{ ok: boolean; content?: string; status?: number; body?: string; }> => {
+      if (!mistralApiKey) {
+        console.error('MISTRAL_API_KEY is missing');
+        return { ok: false, status: 401, body: 'MISTRAL_API_KEY missing' };
+      }
+      
+      console.log('Calling Mistral AI with message');
+      
+      try {
+        // Build messages array for Mistral API
+        const messages = [
+          { role: 'system', content: systemPrompt },
+          ...(Array.isArray(history) ? history : []),
+          { role: 'user', content: `${weatherSummary}\n${marketSummary}\n\nUser: ${message}` }
+        ];
+
+        console.log('Mistral API request payload:', {
+          model: 'mistral-small',
+          messages: messages.length,
           max_tokens: 250,
           temperature: 0.3,
-        }),
-      });
-      if (!resp.ok) {
-        const txt = await resp.text();
-        return { ok: false, status: resp.status, body: txt };
-      }
-      const json = await resp.json();
-      const content = json.choices?.[0]?.message?.content ?? '';
-      return { ok: true, content };
-    };
+        });
 
-    const callGemini = async (): Promise<{ ok: boolean; content?: string; status?: number; body?: string; }> => {
-      if (!geminiApiKey) return { ok: false, status: 401, body: 'GEMINI_API_KEY missing' };
-      console.log('Calling Gemini with message');
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`;
-      const body = {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: `${systemPrompt}` },
-              ...(Array.isArray(history) ? history.map((h: any) => ({ text: `${h.role === 'assistant' ? 'Assistant' : 'User'}: ${h.content}` })) : []),
-              { text: `${weatherSummary}\n${marketSummary}\n\nUser: ${message}` }
-            ]
-          }
-        ],
-        generationConfig: {
-          maxOutputTokens: 250,
-          temperature: 0.3
+        const resp = await fetch('https://api.mistral.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${mistralApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'mistral-small',
+            messages: messages,
+            max_tokens: 250,
+            temperature: 0.3,
+          }),
+        });
+        
+        console.log('Mistral API response status:', resp.status);
+        
+        if (!resp.ok) {
+          const txt = await resp.text();
+          console.error('Mistral API error:', resp.status, txt);
+          return { ok: false, status: resp.status, body: txt };
         }
-      };
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!resp.ok) {
-        const txt = await resp.text();
-        return { ok: false, status: resp.status, body: txt };
+        
+        const json = await resp.json();
+        console.log('Mistral API response received successfully');
+        const content = json.choices?.[0]?.message?.content ?? '';
+        return { ok: true, content };
+      } catch (error) {
+        console.error('Error calling Mistral API:', error);
+        return { ok: false, status: 500, body: `Mistral API call failed: ${error.message}` };
       }
-      const json = await resp.json();
-      const content = json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      return { ok: true, content };
     };
 
-    // choose order
+    // Use Mistral AI as the primary provider
     let result: { ok: boolean; content?: string; status?: number; body?: string; } | null = null;
-    if (preferProvider === 'gemini') {
-      result = await callGemini();
-      if (!result.ok) {
-        const fallbackTry = await callOpenAI();
-        result = fallbackTry;
-      }
-    } else {
-      // default prefer OpenAI if available
-      result = await callOpenAI();
-      if (!result.ok) {
-        const fallbackTry = await callGemini();
-        result = fallbackTry;
-      }
-    }
+    result = await callMistral();
 
     if (!result || !result.ok) {
       const status = result?.status ?? 500;
@@ -179,7 +157,7 @@ serve(async (req) => {
       if (debug) {
         return new Response(JSON.stringify({ 
           status: 'error',
-          error: 'OpenAI request failed',
+          error: 'Mistral AI request failed',
           errorDetails: {
             status,
             body

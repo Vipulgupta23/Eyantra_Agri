@@ -49,7 +49,7 @@ const mockResponses = {
   ],
   hi: [
     "नमस्ते! मैं आपका कृषि सहायक हूँ। आज मैं आपकी कैसे मदद कर सकता हूँ?",
-    "आपकी फसल के लिए मिट्टी की नमी की जांच करना अच्छा होगा।",
+    "आपकी फसल के लिए मिट्टी की नमी की जांच करना अच्छ�� होगा।",
     "बेहतर पैदावार के लिए जैविक खाद का उपयोग करें।",
   ],
   ta: [
@@ -258,68 +258,268 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
       setMessages(prev => [...prev, userMessage]);
       setIsLoading(true);
 
-      const reader = new FileReader();
-      reader.onloadend = async () => {
+      // Try Hugging Face API first, then fallback to intelligent analysis
+      const hfApiKey = import.meta.env.VITE_HUGGINGFACE_API_KEY;
+      let analysisResult = `**Image Analysis:** Agricultural image received for analysis`;
+      
+      if (hfApiKey && hfApiKey !== "hf_your_api_key_here") {
         try {
-          const base64 = (reader.result as string).split(",")[1]; // strip prefix
-          
-          // Use Supabase function for image analysis
-          const { data, error } = await supabase.functions.invoke('analyze-image', {
-            body: {
-              prompt: `Analyze this agricultural image. Identify any crops, diseases, pests, soil conditions, or farming equipment visible. Provide specific recommendations if possible. Respond in ${language === 'hi' ? 'Hindi' : language === 'ta' ? 'Tamil' : 'English'}.`,
-              image: base64,
-              language,
-              farmerData,
+          // Convert file to blob using proper async approach
+          const imageBlob = file;
+
+          // Try Hugging Face models with proper error handling
+          // Using Google ViT, Facebook DETR, and Crop Disease Detection models
+          const models = [
+            {
+              name: "google/vit-base-patch16-224",
+              url: "https://api-inference.huggingface.co/models/google/vit-base-patch16-224",
+              type: "classification"
             },
-          });
+            {
+              name: "facebook/detr-resnet-50",
+              url: "https://api-inference.huggingface.co/models/facebook/detr-resnet-50",
+              type: "object-detection"
+            },
+            {
+              name: "wambugu71/crop_leaf_diseases_vit",
+              url: "https://api-inference.huggingface.co/models/wambugu71/crop_leaf_diseases_vit",
+              type: "disease-detection"
+            }
+          ];
+
+          let analysisResults = {
+            classification: null,
+            objectDetection: null,
+            diseaseDetection: null
+          };
+          let modelUsed = [];
           
-          if (error) {
-            throw error;
+          // Process all models
+          for (const model of models) {
+            try {
+              console.log(`Trying model: ${model.name}`);
+              
+              const response = await fetch(model.url, {
+                headers: { 
+                  Authorization: `Bearer ${hfApiKey}`,
+                  "Content-Type": "application/octet-stream"
+                },
+                method: "POST",
+                body: imageBlob,
+              });
+
+              if (response.ok) {
+                const result = await response.json();
+                console.log(`Response from ${model.name}:`, result);
+                
+                if (model.type === "classification" && Array.isArray(result)) {
+                  // Handle ViT classification results
+                  const topClass = result[0];
+                  if (topClass?.label) {
+                    const confidence = (topClass.score * 100).toFixed(1);
+                    analysisResults.classification = {
+                      label: topClass.label,
+                      confidence: confidence,
+                      allResults: result.slice(0, 3)
+                    };
+                    modelUsed.push(model.name);
+                  }
+                } else if (model.type === "object-detection" && Array.isArray(result)) {
+                  // Handle DETR object detection results
+                  if (result.length > 0) {
+                    const objects = result
+                      .filter(obj => obj.score > 0.3) // Filter low confidence detections
+                      .slice(0, 3);
+                    
+                    if (objects.length > 0) {
+                      analysisResults.objectDetection = {
+                        objects: objects,
+                        summary: objects.map(obj => `${obj.label} (${(obj.score * 100).toFixed(1)}%)`).join(', ')
+                      };
+                      modelUsed.push(model.name);
+                    }
+                  }
+                } else if (model.type === "disease-detection" && Array.isArray(result)) {
+                  // Handle crop disease detection results
+                  const topDisease = result[0];
+                  if (topDisease?.label) {
+                    const confidence = (topDisease.score * 100).toFixed(1);
+                    analysisResults.diseaseDetection = {
+                      disease: topDisease.label,
+                      confidence: confidence,
+                      allResults: result.slice(0, 3)
+                    };
+                    modelUsed.push(model.name);
+                  }
+                }
+              } else {
+                const errorText = await response.text();
+                console.log(`Model ${model.name} failed with status ${response.status}:`, errorText);
+              }
+            } catch (error) {
+              console.log(`Model ${model.name} failed with error:`, error);
+              continue;
+            }
           }
 
-          const analysisResult = data.output || data.response || "I can see the image but couldn't analyze it properly.";
-
-          const botMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            content: analysisResult,
-            sender: 'bot',
-            timestamp: new Date(),
-            type: 'text',
-          };
-
-          setMessages(prev => [...prev, botMessage]);
-        } catch (error) {
-          console.error('Image analysis error:', error);
-          toast({
-            title: t('common.error'),
-            description: "Failed to analyze the image. Please try again.",
-            variant: "destructive",
-          });
+          // Create comprehensive analysis summary for Mistral AI
+          let huggingFaceAnalysis = "Hugging Face Model Analysis Results:\n\n";
           
-          // Add fallback response
-          const fallbackResponse = language === 'hi' ? 
-            "मैं इस छवि को देख सकता हूँ, लेकिन इसका विश्लेषण करने में असमर्थ हूँ। कृपया पुनः प्रयास करें।" :
-            language === 'ta' ?
-            "இந்த படத்தை என்னால் பார்க்க முடிகிறது, ஆனால் பகுப்பாய்வு செய்ய முடியவில்லை. மீண்டும் முயற்சிக்கவும்." :
-            "I can see the image but couldn't analyze it properly. Please try again.";
-            
-          const botMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            content: `⚠️ ${fallbackResponse}`,
-            sender: 'bot',
-            timestamp: new Date(),
-            type: 'text',
-          };
+          if (analysisResults.classification) {
+            huggingFaceAnalysis += `1. Image Classification (Google ViT):\n`;
+            huggingFaceAnalysis += `   - Primary classification: ${analysisResults.classification.label} (${analysisResults.classification.confidence}% confidence)\n`;
+            if (analysisResults.classification.allResults.length > 1) {
+              huggingFaceAnalysis += `   - Alternative classifications: ${analysisResults.classification.allResults.slice(1).map(r => `${r.label} (${(r.score * 100).toFixed(1)}%)`).join(', ')}\n`;
+            }
+            huggingFaceAnalysis += "\n";
+          }
+          
+          if (analysisResults.objectDetection) {
+            huggingFaceAnalysis += `2. Object Detection (Facebook DETR):\n`;
+            huggingFaceAnalysis += `   - Objects found: ${analysisResults.objectDetection.summary}\n\n`;
+          }
+          
+          if (analysisResults.diseaseDetection) {
+            huggingFaceAnalysis += `3. Crop Disease Detection (Specialized Agricultural Model):\n`;
+            huggingFaceAnalysis += `   - Disease identified: ${analysisResults.diseaseDetection.disease} (${analysisResults.diseaseDetection.confidence}% confidence)\n`;
+            if (analysisResults.diseaseDetection.allResults.length > 1) {
+              huggingFaceAnalysis += `   - Other possibilities: ${analysisResults.diseaseDetection.allResults.slice(1).map(r => `${r.label} (${(r.score * 100).toFixed(1)}%)`).join(', ')}\n`;
+            }
+            huggingFaceAnalysis += "\n";
+          }
 
-          setMessages(prev => [...prev, botMessage]);
-        } finally {
-          setIsLoading(false);
+          // If we have any results, send to Mistral AI for comprehensive analysis
+          if (modelUsed.length > 0) {
+            console.log(`Successfully used models: ${modelUsed.join(', ')}`);
+            
+            try {
+              // Call Mistral AI for comprehensive agricultural analysis
+              const mistralApiKey = import.meta.env.VITE_MISTRAL_API_KEY;
+              
+              if (mistralApiKey) {
+                const mistralPrompt = `${huggingFaceAnalysis}
+
+Farmer Context:
+- Location: ${farmerData?.location || 'Unknown'}
+- Crops grown: ${farmerData?.crops?.join(', ') || 'Unknown'}
+- Land size: ${farmerData?.landSize || 'Unknown'} ${farmerData?.landUnit || ''}
+
+Based on the above AI model analysis results, provide comprehensive agricultural advice in ${language === 'hi' ? 'Hindi' : language === 'ta' ? 'Tamil' : 'English'}. Include:
+
+1. Summary of what the AI models detected
+2. Specific agricultural recommendations based on the findings
+3. If diseases were detected, provide treatment suggestions
+4. Preventive measures for the farmer
+5. Next steps and monitoring advice
+
+Keep the response practical, actionable, and under 300 words.`;
+
+                const mistralResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${mistralApiKey}`,
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({
+                    model: 'mistral-small',
+                    messages: [
+                      { role: 'system', content: 'You are an expert agricultural advisor specializing in crop health and disease management.' },
+                      { role: 'user', content: mistralPrompt }
+                    ],
+                    max_tokens: 400,
+                    temperature: 0.3,
+                  }),
+                });
+
+                if (mistralResponse.ok) {
+                  const mistralResult = await mistralResponse.json();
+                  const comprehensiveAnalysis = mistralResult.choices?.[0]?.message?.content || '';
+                  
+                  if (comprehensiveAnalysis) {
+                    analysisResult = `**AI-Powered Agricultural Analysis:**\n\n${comprehensiveAnalysis}`;
+                  } else {
+                    // Fallback to basic analysis
+                    analysisResult = `**Image Analysis Results:**\n\n${huggingFaceAnalysis}`;
+                  }
+                } else {
+                  // Fallback to basic analysis if Mistral fails
+                  analysisResult = `**Image Analysis Results:**\n\n${huggingFaceAnalysis}`;
+                }
+              } else {
+                // No Mistral API key, use basic analysis
+                analysisResult = `**Image Analysis Results:**\n\n${huggingFaceAnalysis}`;
+              }
+            } catch (mistralError) {
+              console.error('Mistral AI error:', mistralError);
+              // Fallback to basic analysis
+              analysisResult = `**Image Analysis Results:**\n\n${huggingFaceAnalysis}`;
+            }
+          } else {
+            console.log('All models failed, using fallback');
+            analysisResult = `**Image Analysis:** Agricultural image received (API analysis unavailable)`;
+          }
+          
+        } catch (error) {
+          console.error('HF API error:', error);
         }
-      };
+      }
       
-      reader.readAsDataURL(file);
+      // Generate contextual advice
+      function generateAdviceAndRespond() {
+        // Smart recommendations based on farmer context
+        let specificAdvice = "";
+        
+        if (farmerData?.crops && farmerData.crops.length > 0) {
+          const cropList = farmerData.crops.join(', ');
+          specificAdvice = language === 'hi' ? 
+            `**${cropList} के लिए सुझाव:**\n- फसल की वर्तमान अवस्था की जांच करें\n- पत्तियों में रोग के लक्��ण देखें\n- मिट्टी की नमी और पोषण जांचें\n- कीट-पतंगों की निगरानी करें\n- स्थानीय मौसम के अनुसार सिंचाई करें` :
+            language === 'ta' ?
+            `**${cropList} க்கான ஆலோசனைகள்:**\n- பயிரின் தற்போதைய நிலையை சரிபார்க்கவும்\n- இலைகளில் நோய் அறிகுறிகளை கவனிக்கவும்\n- மண்ணின் ஈரப்பதம் மற்றும் ஊட்டச்சத்தை சரிபார்க்கவும்\n- பூச்சிகளை கண்காணிக்கவும்\n- உள்ளூர் வானிலைக்கு ஏற்ப நீர்ப்பாசனம் செய்யவும்` :
+            `**Recommendations for ${cropList}:**\n- Check current crop stage and health\n- Look for disease symptoms on leaves\n- Monitor soil moisture and nutrition\n- Watch for pest activity\n- Irrigate according to local weather`;
+        } else {
+          specificAdvice = language === 'hi' ? 
+            "**सामान्य कृषि सुझाव:**\n- नियमित फसल निरीक्षण करें\n- मिट्टी की गुणवत्ता बनाए रखें\n- उचित सिंचाई व्यवस्था करें\n- जैविक खाद का उपयोग क��ें\n- स्थानीय कृषि विशेषज्ञ से सलाह लें" :
+            language === 'ta' ?
+            "**பொதுவான விவசாய ஆலோசனைகள்:**\n- தொடர்ந்து பயிர் ஆய்வு செய்யவும்\n- மண்ணின் தரத்தை பராமரிக்கவும்\n- சரியான நீர்ப்பாசனம் செய்யவும்\n- இயற்கை உரம் பயன்படுத்தவும்\n- உள்ளூர் விவசாய நிபுணரை அணுகவும்" :
+            "**General Agricultural Advice:**\n- Conduct regular crop inspections\n- Maintain soil quality\n- Ensure proper irrigation\n- Use organic fertilizers\n- Consult local agricultural experts";
+        }
+        
+        analysisResult += `\n\n${specificAdvice}`;
+        
+        // Add location-specific advice if available
+        if (farmerData?.location) {
+          const locationAdvice = language === 'hi' ? 
+            `\n\n**${farmerData.location} के लिए विशेष सुझाव:**\n- स्थानीय मौसम पैटर्न का ध्यान रखें\n- क्षेत्रीय कृषि अधिकारियों से संपर्क करें\n- स्था��ीय बाजार की कीमतों की जानकारी रखें` :
+            language === 'ta' ?
+            `\n\n**${farmerData.location} க்கான சிறப்பு ஆலோசனைகள்:**\n- உள்ளூர் வானிலை முறைகளை கவனிக்கவும்\n- பிராந்திய விவசாய அதிகாரிகளை தொடர்பு கொள்ளவும்\n- உள்ளூர் சந்தை விலைகளை அறிந்து கொள்ளவும்` :
+            `\n\n**Specific advice for ${farmerData.location}:**\n- Consider local weather patterns\n- Contact regional agricultural officers\n- Stay updated on local market prices`;
+          
+          analysisResult += locationAdvice;
+        }
+
+        // Add note about AI analysis
+        const aiNote = language === 'hi' ? 
+          `\n\n*नोट: यह AI-आधारित सामान्य सुझाव है। विशिष्ट समस्याओं के लिए स्थानीय कृषि विशेषज्ञ से सलाह लें।*` :
+          language === 'ta' ?
+          `\n\n*குறிப்பு: இது AI-அடிப்படையிலான பொத��வான ஆலோசனை. குறிப்பிட்ட பிரச்சினைகளுக்கு உள்ளூர் விவசாய நிபுணரை அணுகவும்.*` :
+          `\n\n*Note: This is AI-based general advice. For specific issues, please consult local agricultural experts.*`;
+        
+        analysisResult += aiNote;
+
+        const botMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          content: analysisResult,
+          sender: 'bot',
+          timestamp: new Date(),
+          type: 'text',
+        };
+
+        setMessages(prev => [...prev, botMessage]);
+        setIsLoading(false);
+      }
+      
     } catch (error) {
-      console.error('File reading error:', error);
+      console.error('File processing error:', error);
       toast({
         title: t('common.error'),
         description: "Failed to process the image.",
@@ -396,25 +596,64 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
         enhancedMessage = weatherContext;
       }
 
-      const { data, error } = await supabase.functions.invoke('chat-assistant', {
-        body: {
-          message: enhancedMessage,
-          language,
-          farmerData,
-          history: recentHistory,
-          provider: 'gemini',
-          debug: true,
-          hasWeatherData: !!weatherData,
-        },
-      });
+      // Call Mistral AI directly
+      const mistralApiKey = import.meta.env.VITE_MISTRAL_API_KEY;
       
-      if (error) {
-        throw error;
+      if (!mistralApiKey) {
+        throw new Error('Mistral API key not configured');
       }
+
+      // Create system prompt
+      const systemPrompt = `You are Krishi AI, an expert agricultural assistant for India.
+
+      Farmer profile (use to personalize):
+      - Name: ${farmerData?.name || 'Unknown'}
+      - Location: ${farmerData?.location || 'Unknown'}
+      - Crops: ${farmerData?.crops?.join(', ') || 'Unknown'}
+      - Land size: ${farmerData?.landSize || 'Unknown'} ${farmerData?.landUnit || ''}
+
+      Response rules:
+      - Language: ${language === 'hi' ? 'Hindi' : language === 'ta' ? 'Tamil' : 'English'}
+      - Start with a one-line summary tailored to the farmer
+      - Then give 4–6 short bullet points, each actionable and location-aware
+      - Bold key crop names like **Rice**, **Sugarcane**, etc.
+      - Include specific next step(s) and quantities if relevant
+      - If critical info is missing (e.g., season, irrigation), ask up to 2 targeted questions at the end
+      - Keep the entire answer under 180 words
+      - Avoid generic textbook explanations; prioritize practical, local guidance for ${farmerData?.location || 'their area'}`;
+
+      // Build messages for Mistral API
+      const apiMessages = [
+        { role: 'system', content: systemPrompt },
+        ...recentHistory,
+        { role: 'user', content: enhancedMessage }
+      ];
+
+      const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${mistralApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'mistral-small',
+          messages: apiMessages,
+          max_tokens: 250,
+          temperature: 0.3,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Mistral API error: ${response.status} - ${errorText}`);
+      }
+
+      const result = await response.json();
+      const assistantResponse = result.choices?.[0]?.message?.content || 'Sorry, I could not generate a response.';
 
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
-        content: (data as any).response,
+        content: assistantResponse,
         sender: 'bot',
         timestamp: new Date(),
         type: weatherData ? 'weather' : 'text',
