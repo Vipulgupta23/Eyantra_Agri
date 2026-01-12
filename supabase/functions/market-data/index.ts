@@ -9,7 +9,7 @@ const corsHeaders = {
 // Map user locations to states for market data
 const getStateFromLocation = (location: string): string => {
   const locationLower = location.toLowerCase();
-  
+
   if (locationLower.includes('punjab')) return 'Punjab';
   if (locationLower.includes('haryana')) return 'Haryana';
   if (locationLower.includes('uttar pradesh') || locationLower.includes('up')) return 'Uttar Pradesh';
@@ -26,80 +26,130 @@ const getStateFromLocation = (location: string): string => {
   if (locationLower.includes('kerala') || locationLower.includes('kochi')) return 'Kerala';
   if (locationLower.includes('odisha') || locationLower.includes('bhubaneswar')) return 'Odisha';
   if (locationLower.includes('assam') || locationLower.includes('guwahati')) return 'Assam';
-  
+
   // Default fallback based on region detection
   if (locationLower.includes('delhi') || locationLower.includes('ncr')) return 'Delhi';
-  
+
   return 'Maharashtra'; // Default state
 };
 
-// Generate realistic market prices based on state and crop
+// Robust Market Data Estimation Engine (Fallback when API fails)
 const generateMarketData = (state: string, userCrops: string[] = []) => {
-  const stateMultipliers: { [key: string]: number } = {
-    'Punjab': 1.1,
-    'Haryana': 1.05,
-    'Maharashtra': 1.0,
-    'Gujarat': 0.95,
-    'Tamil Nadu': 0.9,
-    'Karnataka': 0.88,
-    'Andhra Pradesh': 0.85,
-    'Uttar Pradesh': 0.92,
-    'Bihar': 0.8,
-    'West Bengal': 0.87,
-    'Rajasthan': 0.93,
-    'Madhya Pradesh': 0.91,
-    'Kerala': 1.15,
-    'Odisha': 0.82,
-    'Telangana': 0.86,
-    'Assam': 0.84,
-    'Delhi': 1.2
+  const month = new Date().getMonth() + 1; // 1-12
+
+  // State-specific price multipliers (Supply vs Demand)
+  // < 1.0 means cheaper (producer state), > 1.0 means expensive (consumer state)
+  const stateFactors: { [key: string]: { [key: string]: number } } = {
+    'Punjab': { 'Wheat': 0.9, 'Rice': 0.92, 'Maize': 0.95, 'Mustard': 0.95 },
+    'Haryana': { 'Wheat': 0.9, 'Rice': 0.92, 'Bajra': 0.9, 'Mustard': 0.94 },
+    'Madhya Pradesh': { 'Wheat': 0.92, 'Soybean': 0.88, 'Gram': 0.85, 'Garlic': 0.8 },
+    'Maharashtra': { 'Onion': 0.7, 'Grapes': 0.8, 'Cotton': 0.9, 'Sugarcane': 0.95 },
+    'Gujarat': { 'Cotton': 0.88, 'Groundnut': 0.85, 'Cumin': 0.8, 'Onion': 0.85 },
+    'UP': { 'Sugarcane': 0.9, 'Wheat': 0.93, 'Potato': 0.8, 'Mango': 0.85 },
+    'West Bengal': { 'Rice': 0.88, 'Jute': 0.85, 'Potato': 0.85 },
+    'Tamil Nadu': { 'Rice': 0.95, 'Coconut': 0.8, 'Banana': 0.85 },
+    'Kerala': { 'Coconut': 0.75, 'Spices': 0.8, 'Rubber': 0.85, 'Rice': 1.2 },
+    'Karnataka': { 'Coffee': 0.8, 'Ragi': 0.85, 'Arecanut': 0.8 },
+    'Andhra Pradesh': { 'Rice': 0.9, 'Chilli': 0.8, 'Tobacco': 0.85 },
+    'Telangana': { 'Cotton': 0.9, 'Turmeric': 0.85, 'Maize': 0.92 },
+    'Rajasthan': { 'Bajra': 0.85, 'Mustard': 0.88, 'Coriander': 0.85, 'Guar': 0.8 },
+    'Bihar': { 'Maize': 0.88, 'Litchi': 0.8, 'Rice': 0.95 },
   };
 
+  // 2026 Realistic Base Prices (Per Quintal) roughly for India avg
   const baseData = [
-    { crop: 'Rice', basePrice: 2850, msp: 2700, volatility: 0.1 },
-    { crop: 'Wheat', basePrice: 2450, msp: 2425, volatility: 0.08 },
-    { crop: 'Cotton', basePrice: 6800, msp: 6620, volatility: 0.15 },
-    { crop: 'Sugarcane', basePrice: 385, msp: 375, volatility: 0.05 },
-    { crop: 'Soybean', basePrice: 4200, msp: 4300, volatility: 0.12 },
-    { crop: 'Groundnut', basePrice: 5850, msp: 5850, volatility: 0.14 },
-    { crop: 'Maize', basePrice: 2100, msp: 2090, volatility: 0.09 },
-    { crop: 'Bajra', basePrice: 2500, msp: 2350, volatility: 0.11 },
-    { crop: 'Jowar', basePrice: 3180, msp: 3225, volatility: 0.10 },
-    { crop: 'Barley', basePrice: 1735, msp: 1850, volatility: 0.08 }
+    { crop: 'Rice', basePrice: 2900, msp: 2300, volatility: 0.05 },
+    { crop: 'Wheat', basePrice: 2550, msp: 2275, volatility: 0.04 },
+    { crop: 'Cotton', basePrice: 7200, msp: 6620, volatility: 0.12 },
+    { crop: 'Sugarcane', basePrice: 390, msp: 340, volatility: 0.02 }, // Per Quintal
+    { crop: 'Soybean', basePrice: 4600, msp: 4600, volatility: 0.10 },
+    { crop: 'Groundnut', basePrice: 6200, msp: 6377, volatility: 0.08 },
+    { crop: 'Maize', basePrice: 2250, msp: 2090, volatility: 0.06 },
+    { crop: 'Bajra', basePrice: 2450, msp: 2500, volatility: 0.07 },
+    { crop: 'Mustard', basePrice: 5600, msp: 5650, volatility: 0.09 },
+    { crop: 'Gram', basePrice: 5900, msp: 5440, volatility: 0.08 },
+    { crop: 'Onion', basePrice: 3500, msp: 0, volatility: 0.40 }, // High volatility
+    { crop: 'Potato', basePrice: 1800, msp: 0, volatility: 0.25 },
+    { crop: 'Tomato', basePrice: 3000, msp: 0, volatility: 0.50 },
+    { crop: 'Tur', basePrice: 9500, msp: 7000, volatility: 0.10 },
+    { crop: 'Moong', basePrice: 8200, msp: 8558, volatility: 0.08 },
   ];
 
-  const multiplier = stateMultipliers[state] || 1.0;
-  
+  // Seasonality Logic roughly (1 = neutral, >1 expensive (off-season/demand), <1 cheap (harvest))
+  const getSeasonalFactor = (crop: string) => {
+    const c = crop.toLowerCase();
+    // Rabi Harvest (Mar-May): Wheat, Mustard, Gram -> Low Price
+    if (['wheat', 'mustard', 'gram', 'barley'].includes(c)) {
+      if (month >= 3 && month <= 5) return 0.9;
+      if (month >= 11 && month <= 2) return 1.1; // Pre-harvest high
+    }
+    // Kharif Harvest (Oct-Dec): Rice, Soybean, Cotton, Maize -> Low Price
+    if (['rice', 'paddy', 'soybean', 'cotton', 'maize', 'bajra', 'groundnut'].includes(c)) {
+      if (month >= 10 && month <= 12) return 0.9;
+      if (month >= 6 && month <= 8) return 1.1;
+    }
+    // Perishables
+    if (c === 'onion') return month >= 9 && month <= 12 ? 1.5 : 0.8; // Late kharif crisis usually
+    if (c === 'tomato') return month >= 6 && month <= 8 ? 1.4 : 0.8;
+
+    return 1.0;
+  };
+
+  const multiplier = 1.0; // Default state multiplier if not found
+
   // Prioritize user crops
-  const prioritizedCrops = userCrops.length > 0 
-    ? baseData.filter(crop => userCrops.some(userCrop => 
-        userCrop.toLowerCase().includes(crop.crop.toLowerCase()) || 
-        crop.crop.toLowerCase().includes(userCrop.toLowerCase())
-      ))
+  const prioritizedCrops = userCrops.length > 0
+    ? baseData.filter(crop => userCrops.some(userCrop =>
+      userCrop.toLowerCase().includes(crop.crop.toLowerCase()) ||
+      crop.crop.toLowerCase().includes(userCrop.toLowerCase())
+    ))
     : [];
 
-  const otherCrops = baseData.filter(crop => 
+  const otherCrops = baseData.filter(crop =>
     !prioritizedCrops.some(pc => pc.crop === crop.crop)
   );
 
   const selectedCrops = [
     ...prioritizedCrops,
-    ...otherCrops.slice(0, Math.max(0, 6 - prioritizedCrops.length))
+    ...otherCrops.slice(0, Math.max(0, 8 - prioritizedCrops.length))
   ];
 
   return selectedCrops.map(item => {
-    const randomFactor = 1 + (Math.random() - 0.5) * item.volatility;
-    const currentPrice = Math.round(item.basePrice * multiplier * randomFactor);
-    const change = ((currentPrice - item.basePrice) / item.basePrice * 100);
-    
+    // 1. Identify state factor
+    let stateFactor = 1.05; // Slightly above avg default
+    // Check if state is in our dictionary map (handling varied spellings)
+    for (const [sKey, factors] of Object.entries(stateFactors)) {
+      if (state.toLowerCase().includes(sKey.toLowerCase())) {
+        // Known state
+        stateFactor = factors[item.crop] || 1.0; // Specific crop factor or avg
+        break;
+      }
+    }
+
+    // 2. Identify seasonal factor
+    const seasonalFactor = getSeasonalFactor(item.crop);
+
+    // 3. Add small daily noise (Simulated realism)
+    const randomNoise = 1 + (Math.random() - 0.5) * item.volatility;
+
+    // Calculate Final Estimated Price
+    let estimatedPrice = Math.round(item.basePrice * stateFactor * seasonalFactor * randomNoise);
+
+    // Ensure estimated price isn't ridiculously below MSP unless it's a crisis crop (onion/tomato)
+    if (item.msp > 0 && estimatedPrice < item.msp * 0.85) {
+      estimatedPrice = Math.round(item.msp * 0.95); // Support levels
+    }
+
+    const change = ((estimatedPrice - item.basePrice) / item.basePrice * 100);
+
     let trend = 'stable';
-    if (change > 1) trend = 'up';
-    else if (change < -1) trend = 'down';
+    if (change > 2) trend = 'up';
+    else if (change < -2) trend = 'down';
 
     return {
       crop: item.crop,
-      currentPrice,
-      msp: Math.round(item.msp * multiplier),
+      currentPrice: estimatedPrice,
+      msp: Math.round(item.msp),
       trend,
       change: `${change >= 0 ? '+' : ''}${change.toFixed(1)}%`,
       market: state,
@@ -123,7 +173,69 @@ serve(async (req) => {
 
     const state = getStateFromLocation(location);
 
-    // Try AGMARKNET (data.gov.in) first if key is present
+    // 1. Try Custom Scraper API (if configured)
+    // Supports the Python scraper format: /request?commodity=X&state=Y&market=Z
+    const customApiUrl = Deno.env.get('MARKET_DATA_API_URL');
+    if (customApiUrl) {
+      try {
+        console.log('Fetching from custom API:', customApiUrl);
+        // Map common crops/states to Agmarknet names if needed
+        // For now pass directly
+        const promises = userCrops.slice(0, 5).map(async (crop) => {
+          try {
+            // Construct URL: baseUrl/request?commodity=Crop&state=State
+            const url = new URL(customApiUrl.endsWith('/') ? customApiUrl + 'request' : customApiUrl + '/request');
+            url.searchParams.set('commodity', crop);
+            url.searchParams.set('state', state);
+            // Market is optional, maybe don't set to get state average?
+            // url.searchParams.set('market', state); 
+
+            // Check if user is using the python scraper pattern
+            const resp = await fetch(url.toString());
+            if (resp.ok) {
+              const json = await resp.json();
+              // Expecting array: [{ "Model Prize": "1600", "Date": "..." }]
+              if (Array.isArray(json) && json.length > 0) {
+                const latest = json[0];
+                const price = parseFloat(latest["Model Prize"]);
+                if (!isNaN(price)) {
+                  return {
+                    crop,
+                    currentPrice: price,
+                    msp: 0, // Scraper might not have MSP
+                    trend: 'stable', // Could calulcate from history
+                    change: '0%',
+                    market: state,
+                    source: 'custom-api'
+                  };
+                }
+              }
+            }
+          } catch (e) {
+            console.error(`Custom API failed for ${crop}:`, e);
+          }
+          return null;
+        });
+
+        const results = await Promise.all(promises);
+        const validResults = results.filter(r => r !== null);
+
+        if (validResults.length > 0) {
+          return new Response(JSON.stringify({
+            marketData: validResults,
+            state,
+            status: 'success',
+            source: 'custom-api'
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+      } catch (err) {
+        console.error('Custom API error:', err);
+      }
+    }
+
+    // 2. Try AGMARKNET (data.gov.in) first if key is present
     const agmarkKey = Deno.env.get('AGMARKNET_API_KEY');
     if (agmarkKey) {
       try {

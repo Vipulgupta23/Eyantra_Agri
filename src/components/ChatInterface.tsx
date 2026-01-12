@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Send, Image, Paperclip, Bot, User, Cloud, Thermometer, Droplets } from 'lucide-react';
+import { Send, Image, Bot, User, Cloud, Thermometer, Droplets, Mic, MicOff, Volume2, StopCircle } from 'lucide-react';
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useTranslation } from "@/lib/translations";
@@ -39,32 +39,28 @@ const weatherKeywords = {
   ta: ['வானிலை', 'வெப்பநிலை', 'மழை', 'ஈரப்பதம்', 'காற்று', 'முன்னறிவிப்பு', 'தட்பவெப்ப நிலை']
 };
 
-// Mock AI responses for demo
-const mockResponses = {
-  en: [
-    "Hello! I'm your agricultural assistant. How can I help you today?",
-    "Based on your location and crop, I recommend checking the soil moisture levels.",
-    "For better yield, consider organic fertilizers during this season.",
-    "Weather conditions look favorable for sowing. Would you like specific timing recommendations?",
-  ],
-  hi: [
-    "नमस्ते! मैं आपका कृषि सहायक हूँ। आज मैं आपकी कैसे मदद कर सकता हूँ?",
-    "आपकी फसल के लिए मिट्टी की नमी की जांच करना अच्छ�� होगा।",
-    "बेहतर पैदावार के लिए जैविक खाद का उपयोग करें।",
-  ],
-  ta: [
-    "வணக்கம்! நான் உங்கள் விவசாய உதவியாளர். இன்று நான் உங்களுக்கு எப்படி உதவ முடியும்?",
-    "உங்கள் பயிருக்கு மண்ணின் ஈரப்பதத்தை சரிபார்ப்பது நல்லது.",
-  ],
+// Personalized greeting based on language and farmer name
+const getWelcomeMessage = (language: string, farmerName?: string): string => {
+  const name = farmerName || 'Farmer';
+  switch (language) {
+    case 'hi':
+      return `नमस्ते ${name} जी! 🙏 मैं कृषि सहायक AI हूँ। आपकी फसलों और खेती से जुड़े किसी भी सवाल का जवाब देने के लिए तैयार हूँ। आप मुझसे हिंदी में बात कर सकते हैं!`;
+    case 'ta':
+      return `வணக்கம் ${name}! 🙏 நான் கிருஷி சகாயக் AI. உங்கள் பயிர்கள் மற்றும் விவசாயம் தொடர்பான எந்த கேள்விக்கும் பதிலளிக்க தயாராக இருக்கிறேன்!`;
+    default:
+      return `Hello ${name}! 🙏 I'm Krishi Sahayak AI, your personal farming assistant. I'm ready to help with questions about your crops, diseases, weather, and farming practices. Feel free to ask me anything or upload images of your crops!`;
+  }
 };
 
 export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerData }) => {
   const { toast } = useToast();
   const t = useTranslation(language);
+
+  // Initialize with personalized welcome message
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
-      content: mockResponses[language as keyof typeof mockResponses]?.[0] || mockResponses.en[0],
+      content: getWelcomeMessage(language, farmerData?.name),
       sender: 'bot',
       timestamp: new Date(),
       type: 'text',
@@ -73,8 +69,140 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
   const [newMessage, setNewMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [chatHistory, setChatHistory] = useState<Array<{ role: string, content: string }>>([]);
+
+  // Voice State
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const recognitionRef = useRef<any>(null);
+  const synthRef = useRef<SpeechSynthesis>(window.speechSynthesis);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  // Cleanup speech synthesis on unmount
+  useEffect(() => {
+    return () => {
+      if (synthRef.current) {
+        synthRef.current.cancel();
+      }
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
+  }, []);
+
+  // Initialize Speech Recognition
+  useEffect(() => {
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = false;
+
+      recognitionRef.current.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        setNewMessage(transcript);
+        setIsListening(false);
+      };
+
+      recognitionRef.current.onerror = (event: any) => {
+        console.error('Speech recognition error', event.error);
+        setIsListening(false);
+
+        let errorMessage = "Could not hear you. Please try again.";
+        let errorTitle = "Voice Input Error";
+
+        if (event.error === 'not-allowed') {
+          errorTitle = "Microphone Permission Denied";
+          errorMessage = "Please allow microphone access in your browser settings to use voice features.";
+        } else if (event.error === 'no-speech') {
+          errorTitle = "No Speech Detected";
+          errorMessage = "I didn't hear anything. Please try speaking again.";
+        } else if (event.error === 'network') {
+          errorTitle = "Network Error";
+          errorMessage = "Voice recognition requires an internet connection.";
+        }
+
+        toast({
+          title: errorTitle,
+          description: errorMessage,
+          variant: "destructive"
+        });
+      };
+
+      recognitionRef.current.onend = () => {
+        setIsListening(false);
+      };
+    }
+  }, []);
+
+  const toggleListening = () => {
+    if (!recognitionRef.current) {
+      toast({
+        title: "Not Supported",
+        description: "Voice input is not supported in this browser.",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    if (isListening) {
+      recognitionRef.current.stop();
+    } else {
+      // Set language based on current app language
+      let langCode = 'en-IN';
+      if (language === 'hi') langCode = 'hi-IN';
+      else if (language === 'ta') langCode = 'ta-IN';
+
+      recognitionRef.current.lang = langCode;
+      try {
+        recognitionRef.current.start();
+        setIsListening(true);
+      } catch (e) {
+        console.error("Mic start error:", e);
+      }
+    }
+  };
+
+  const handleSpeak = (text: string) => {
+    if (isSpeaking) {
+      synthRef.current.cancel();
+      setIsSpeaking(false);
+      return;
+    }
+
+    // Clean text (remove markdown asterisks)
+    const cleanText = text.replace(/\*\*/g, '').replace(/[\#\-\*]/g, '');
+
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+
+    // Attempt to match language voice
+    const voices = synthRef.current.getVoices();
+    let langCode = 'en-IN';
+    if (language === 'hi') langCode = 'hi-IN';
+    else if (language === 'ta') langCode = 'ta-IN';
+
+    // Try to find an exact locale match
+    const voice = voices.find(v => v.lang.includes(langCode)) || voices.find(v => v.lang.includes(language));
+    if (voice) {
+      utterance.voice = voice;
+    }
+
+    utterance.lang = langCode;
+    utterance.rate = 0.9; // Slightly slower for clarity
+
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    setIsSpeaking(true);
+    synthRef.current.speak(utterance);
+  };
 
   // Check if message contains weather-related keywords
   const containsWeatherKeyword = (message: string): boolean => {
@@ -86,21 +214,23 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
   // Fetch weather data
   const fetchWeatherData = async (): Promise<any> => {
     if (!farmerData?.latitude || !farmerData?.longitude) {
-      throw new Error('Location coordinates not available');
+      return null;
     }
 
-    const { data, error } = await supabase.functions.invoke('weather-data', {
-      body: {
-        latitude: farmerData.latitude,
-        longitude: farmerData.longitude,
-      },
-    });
+    try {
+      const { data, error } = await supabase.functions.invoke('weather-data', {
+        body: {
+          latitude: farmerData.latitude,
+          longitude: farmerData.longitude,
+        },
+      });
 
-    if (error) {
-      throw error;
+      if (error) throw error;
+      return data.weather;
+    } catch (error) {
+      console.error('Weather fetch error:', error);
+      return null;
     }
-
-    return data.weather;
   };
 
   // Render weather data in a formatted way
@@ -115,7 +245,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
           <Cloud className="h-5 w-5 text-blue-500" />
           {t('weather.currentWeather')} - {current.location}
         </div>
-        
+
         <div className="grid grid-cols-2 gap-4">
           <div className="flex items-center gap-2">
             <Thermometer className="h-4 w-4 text-red-500" />
@@ -161,9 +291,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
     );
   };
 
+  // Render bot message with markdown-like formatting
   const renderBotMessage = (text: string, weatherData?: any) => {
-    // Very lightweight markdown-ish rendering: **bold**, - bullets, newlines
-    // 1) Split into lines to detect bullet blocks
     const lines = text.split(/\n/);
     const blocks: JSX.Element[] = [];
     let currentList: string[] = [];
@@ -174,8 +303,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
           <ul key={`ul-${blocks.length}`} className="list-disc pl-4 space-y-2">
             {currentList.map((li, idx) => (
               <li key={idx} dangerouslySetInnerHTML={{
-                __html: li
-                  .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                __html: li.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
               }} />
             ))}
           </ul>
@@ -202,11 +330,26 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
       }
     }
     flushList();
-    
+
     return (
       <div className="space-y-3">
         <div className="space-y-1">{blocks}</div>
         {weatherData && renderWeatherData(weatherData)}
+        {/* Speak Button for Bot Messages */}
+        <div className="flex justify-end pt-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-muted-foreground hover:text-primary"
+            onClick={() => handleSpeak(text)}
+            title="Read Aloud"
+          >
+            {isSpeaking ? <StopCircle className="h-3 w-3 mr-1" /> : <Volume2 className="h-3 w-3 mr-1" />}
+            <span className="text-[10px]">
+              {language === 'hi' ? 'सुने' : language === 'ta' ? 'கேளுங்கள்' : 'Listen'}
+            </span>
+          </Button>
+        </div>
       </div>
     );
   };
@@ -215,10 +358,22 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+  // Convert file to base64
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => {
+        const result = reader.result as string;
+        // Remove the data:image/xxx;base64, prefix
+        const base64 = result.split(',')[1];
+        resolve(base64);
+      };
+      reader.onerror = error => reject(error);
+    });
+  };
 
+  // Handle image upload - uses Supabase analyze-image function
   const handleImageUpload = async (file: File) => {
     if (!file.type.startsWith('image/')) {
       toast({
@@ -240,15 +395,16 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
     }
 
     setIsUploadingImage(true);
+    setIsLoading(true);
 
     try {
       // Create a preview URL for the user message
       const imageUrl = URL.createObjectURL(file);
-      
+
       // Add user message with image
       const userMessage: Message = {
         id: Date.now().toString(),
-        content: "Uploaded an image",
+        content: language === 'hi' ? "📷 छवि अपलोड की गई" : language === 'ta' ? "📷 படம் பதிவேற்றப்பட்டது" : "📷 Image uploaded for analysis",
         sender: 'user',
         timestamp: new Date(),
         type: 'image',
@@ -256,278 +412,69 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ language, farmerDa
       };
 
       setMessages(prev => [...prev, userMessage]);
-      setIsLoading(true);
 
-      // Try Hugging Face API first, then fallback to intelligent analysis
-      const hfApiKey = import.meta.env.VITE_HUGGINGFACE_API_KEY;
-      let analysisResult = `**Image Analysis:** Agricultural image received for analysis`;
-      
-      if (hfApiKey && hfApiKey !== "hf_your_api_key_here") {
-        try {
-          // Convert file to blob using proper async approach
-          const imageBlob = file;
+      // Convert image to base64
+      const base64Image = await fileToBase64(file);
 
-          // Try Hugging Face models with proper error handling
-          // Using Google ViT, Facebook DETR, and Crop Disease Detection models
-          const models = [
-            {
-              name: "google/vit-base-patch16-224",
-              url: "https://api-inference.huggingface.co/models/google/vit-base-patch16-224",
-              type: "classification"
-            },
-            {
-              name: "facebook/detr-resnet-50",
-              url: "https://api-inference.huggingface.co/models/facebook/detr-resnet-50",
-              type: "object-detection"
-            },
-            {
-              name: "wambugu71/crop_leaf_diseases_vit",
-              url: "https://api-inference.huggingface.co/models/wambugu71/crop_leaf_diseases_vit",
-              type: "disease-detection"
-            }
-          ];
+      // Call Supabase analyze-image function (uses Gemini)
+      const { data, error } = await supabase.functions.invoke('analyze-image', {
+        body: {
+          image: base64Image,
+          language: language,
+          farmerData: farmerData,
+        },
+      });
 
-          let analysisResults = {
-            classification: null,
-            objectDetection: null,
-            diseaseDetection: null
-          };
-          let modelUsed = [];
-          
-          // Process all models
-          for (const model of models) {
-            try {
-              console.log(`Trying model: ${model.name}`);
-              
-              const response = await fetch(model.url, {
-                headers: { 
-                  Authorization: `Bearer ${hfApiKey}`,
-                  "Content-Type": "application/octet-stream"
-                },
-                method: "POST",
-                body: imageBlob,
-              });
-
-              if (response.ok) {
-                const result = await response.json();
-                console.log(`Response from ${model.name}:`, result);
-                
-                if (model.type === "classification" && Array.isArray(result)) {
-                  // Handle ViT classification results
-                  const topClass = result[0];
-                  if (topClass?.label) {
-                    const confidence = (topClass.score * 100).toFixed(1);
-                    analysisResults.classification = {
-                      label: topClass.label,
-                      confidence: confidence,
-                      allResults: result.slice(0, 3)
-                    };
-                    modelUsed.push(model.name);
-                  }
-                } else if (model.type === "object-detection" && Array.isArray(result)) {
-                  // Handle DETR object detection results
-                  if (result.length > 0) {
-                    const objects = result
-                      .filter(obj => obj.score > 0.3) // Filter low confidence detections
-                      .slice(0, 3);
-                    
-                    if (objects.length > 0) {
-                      analysisResults.objectDetection = {
-                        objects: objects,
-                        summary: objects.map(obj => `${obj.label} (${(obj.score * 100).toFixed(1)}%)`).join(', ')
-                      };
-                      modelUsed.push(model.name);
-                    }
-                  }
-                } else if (model.type === "disease-detection" && Array.isArray(result)) {
-                  // Handle crop disease detection results
-                  const topDisease = result[0];
-                  if (topDisease?.label) {
-                    const confidence = (topDisease.score * 100).toFixed(1);
-                    analysisResults.diseaseDetection = {
-                      disease: topDisease.label,
-                      confidence: confidence,
-                      allResults: result.slice(0, 3)
-                    };
-                    modelUsed.push(model.name);
-                  }
-                }
-              } else {
-                const errorText = await response.text();
-                console.log(`Model ${model.name} failed with status ${response.status}:`, errorText);
-              }
-            } catch (error) {
-              console.log(`Model ${model.name} failed with error:`, error);
-              continue;
-            }
-          }
-
-          // Create comprehensive analysis summary for Mistral AI
-          let huggingFaceAnalysis = "Hugging Face Model Analysis Results:\n\n";
-          
-          if (analysisResults.classification) {
-            huggingFaceAnalysis += `1. Image Classification (Google ViT):\n`;
-            huggingFaceAnalysis += `   - Primary classification: ${analysisResults.classification.label} (${analysisResults.classification.confidence}% confidence)\n`;
-            if (analysisResults.classification.allResults.length > 1) {
-              huggingFaceAnalysis += `   - Alternative classifications: ${analysisResults.classification.allResults.slice(1).map(r => `${r.label} (${(r.score * 100).toFixed(1)}%)`).join(', ')}\n`;
-            }
-            huggingFaceAnalysis += "\n";
-          }
-          
-          if (analysisResults.objectDetection) {
-            huggingFaceAnalysis += `2. Object Detection (Facebook DETR):\n`;
-            huggingFaceAnalysis += `   - Objects found: ${analysisResults.objectDetection.summary}\n\n`;
-          }
-          
-          if (analysisResults.diseaseDetection) {
-            huggingFaceAnalysis += `3. Crop Disease Detection (Specialized Agricultural Model):\n`;
-            huggingFaceAnalysis += `   - Disease identified: ${analysisResults.diseaseDetection.disease} (${analysisResults.diseaseDetection.confidence}% confidence)\n`;
-            if (analysisResults.diseaseDetection.allResults.length > 1) {
-              huggingFaceAnalysis += `   - Other possibilities: ${analysisResults.diseaseDetection.allResults.slice(1).map(r => `${r.label} (${(r.score * 100).toFixed(1)}%)`).join(', ')}\n`;
-            }
-            huggingFaceAnalysis += "\n";
-          }
-
-          // If we have any results, send to Mistral AI for comprehensive analysis
-          if (modelUsed.length > 0) {
-            console.log(`Successfully used models: ${modelUsed.join(', ')}`);
-            
-            try {
-              // Call Mistral AI for comprehensive agricultural analysis
-              const mistralApiKey = import.meta.env.VITE_MISTRAL_API_KEY;
-              
-              if (mistralApiKey) {
-                const mistralPrompt = `${huggingFaceAnalysis}
-
-Farmer Context:
-- Location: ${farmerData?.location || 'Unknown'}
-- Crops grown: ${farmerData?.crops?.join(', ') || 'Unknown'}
-- Land size: ${farmerData?.landSize || 'Unknown'} ${farmerData?.landUnit || ''}
-
-Based on the above AI model analysis results, provide comprehensive agricultural advice in ${language === 'hi' ? 'Hindi' : language === 'ta' ? 'Tamil' : 'English'}. Include:
-
-1. Summary of what the AI models detected
-2. Specific agricultural recommendations based on the findings
-3. If diseases were detected, provide treatment suggestions
-4. Preventive measures for the farmer
-5. Next steps and monitoring advice
-
-Keep the response practical, actionable, and under 300 words.`;
-
-                const mistralResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
-                  method: 'POST',
-                  headers: {
-                    'Authorization': `Bearer ${mistralApiKey}`,
-                    'Content-Type': 'application/json',
-                  },
-                  body: JSON.stringify({
-                    model: 'mistral-small',
-                    messages: [
-                      { role: 'system', content: 'You are an expert agricultural advisor specializing in crop health and disease management.' },
-                      { role: 'user', content: mistralPrompt }
-                    ],
-                    max_tokens: 400,
-                    temperature: 0.3,
-                  }),
-                });
-
-                if (mistralResponse.ok) {
-                  const mistralResult = await mistralResponse.json();
-                  const comprehensiveAnalysis = mistralResult.choices?.[0]?.message?.content || '';
-                  
-                  if (comprehensiveAnalysis) {
-                    analysisResult = `**AI-Powered Agricultural Analysis:**\n\n${comprehensiveAnalysis}`;
-                  } else {
-                    // Fallback to basic analysis
-                    analysisResult = `**Image Analysis Results:**\n\n${huggingFaceAnalysis}`;
-                  }
-                } else {
-                  // Fallback to basic analysis if Mistral fails
-                  analysisResult = `**Image Analysis Results:**\n\n${huggingFaceAnalysis}`;
-                }
-              } else {
-                // No Mistral API key, use basic analysis
-                analysisResult = `**Image Analysis Results:**\n\n${huggingFaceAnalysis}`;
-              }
-            } catch (mistralError) {
-              console.error('Mistral AI error:', mistralError);
-              // Fallback to basic analysis
-              analysisResult = `**Image Analysis Results:**\n\n${huggingFaceAnalysis}`;
-            }
-          } else {
-            console.log('All models failed, using fallback');
-            analysisResult = `**Image Analysis:** Agricultural image received (API analysis unavailable)`;
-          }
-          
-        } catch (error) {
-          console.error('HF API error:', error);
-        }
+      if (error) {
+        throw error;
       }
-      
-      // Generate contextual advice
-      function generateAdviceAndRespond() {
-        // Smart recommendations based on farmer context
-        let specificAdvice = "";
-        
-        if (farmerData?.crops && farmerData.crops.length > 0) {
-          const cropList = farmerData.crops.join(', ');
-          specificAdvice = language === 'hi' ? 
-            `**${cropList} के लिए सुझाव:**\n- फसल की वर्तमान अवस्था की जांच करें\n- पत्तियों में रोग के लक्��ण देखें\n- मिट्टी की नमी और पोषण जांचें\n- कीट-पतंगों की निगरानी करें\n- स्थानीय मौसम के अनुसार सिंचाई करें` :
-            language === 'ta' ?
-            `**${cropList} க்கான ஆலோசனைகள்:**\n- பயிரின் தற்போதைய நிலையை சரிபார்க்கவும்\n- இலைகளில் நோய் அறிகுறிகளை கவனிக்கவும்\n- மண்ணின் ஈரப்பதம் மற்றும் ஊட்டச்சத்தை சரிபார்க்கவும்\n- பூச்சிகளை கண்காணிக்கவும்\n- உள்ளூர் வானிலைக்கு ஏற்ப நீர்ப்பாசனம் செய்யவும்` :
-            `**Recommendations for ${cropList}:**\n- Check current crop stage and health\n- Look for disease symptoms on leaves\n- Monitor soil moisture and nutrition\n- Watch for pest activity\n- Irrigate according to local weather`;
-        } else {
-          specificAdvice = language === 'hi' ? 
-            "**सामान्य कृषि सुझाव:**\n- नियमित फसल निरीक्षण करें\n- मिट्टी की गुणवत्ता बनाए रखें\n- उचित सिंचाई व्यवस्था करें\n- जैविक खाद का उपयोग क��ें\n- स्थानीय कृषि विशेषज्ञ से सलाह लें" :
-            language === 'ta' ?
-            "**பொதுவான விவசாய ஆலோசனைகள்:**\n- தொடர்ந்து பயிர் ஆய்வு செய்யவும்\n- மண்ணின் தரத்தை பராமரிக்கவும்\n- சரியான நீர்ப்பாசனம் செய்யவும்\n- இயற்கை உரம் பயன்படுத்தவும்\n- உள்ளூர் விவசாய நிபுணரை அணுகவும்" :
-            "**General Agricultural Advice:**\n- Conduct regular crop inspections\n- Maintain soil quality\n- Ensure proper irrigation\n- Use organic fertilizers\n- Consult local agricultural experts";
-        }
-        
-        analysisResult += `\n\n${specificAdvice}`;
-        
-        // Add location-specific advice if available
-        if (farmerData?.location) {
-          const locationAdvice = language === 'hi' ? 
-            `\n\n**${farmerData.location} के लिए विशेष सुझाव:**\n- स्थानीय मौसम पैटर्न का ध्यान रखें\n- क्षेत्रीय कृषि अधिकारियों से संपर्क करें\n- स्था��ीय बाजार की कीमतों की जानकारी रखें` :
-            language === 'ta' ?
-            `\n\n**${farmerData.location} க்கான சிறப்பு ஆலோசனைகள்:**\n- உள்ளூர் வானிலை முறைகளை கவனிக்கவும்\n- பிராந்திய விவசாய அதிகாரிகளை தொடர்பு கொள்ளவும்\n- உள்ளூர் சந்தை விலைகளை அறிந்து கொள்ளவும்` :
-            `\n\n**Specific advice for ${farmerData.location}:**\n- Consider local weather patterns\n- Contact regional agricultural officers\n- Stay updated on local market prices`;
-          
-          analysisResult += locationAdvice;
-        }
 
-        // Add note about AI analysis
-        const aiNote = language === 'hi' ? 
-          `\n\n*नोट: यह AI-आधारित सामान्य सुझाव है। विशिष्ट समस्याओं के लिए स्थानीय कृषि विशेषज्ञ से सलाह लें।*` :
-          language === 'ta' ?
-          `\n\n*குறிப்பு: இது AI-அடிப்படையிலான பொத��வான ஆலோசனை. குறிப்பிட்ட பிரச்சினைகளுக்கு உள்ளூர் விவசாய நிபுணரை அணுகவும்.*` :
-          `\n\n*Note: This is AI-based general advice. For specific issues, please consult local agricultural experts.*`;
-        
-        analysisResult += aiNote;
+      const analysisResult = data?.output || data?.error ||
+        (language === 'hi' ? 'छवि का विश्लेषण नहीं हो सका।' :
+          language === 'ta' ? 'படத்தை பகுப்பாய்வு செய்ய முடியவில்லை.' :
+            'Could not analyze the image.');
 
-        const botMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          content: analysisResult,
-          sender: 'bot',
-          timestamp: new Date(),
-          type: 'text',
-        };
+      const botMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        content: analysisResult,
+        sender: 'bot',
+        timestamp: new Date(),
+        type: 'text',
+      };
 
-        setMessages(prev => [...prev, botMessage]);
-        setIsLoading(false);
-      }
-      
+      setMessages(prev => [...prev, botMessage]);
+
+      // Add to chat history
+      setChatHistory(prev => [
+        ...prev,
+        { role: 'user', content: 'Uploaded an image for analysis' },
+        { role: 'assistant', content: analysisResult }
+      ]);
+
     } catch (error) {
-      console.error('File processing error:', error);
+      console.error('Image analysis error:', error);
       toast({
         title: t('common.error'),
-        description: "Failed to process the image.",
+        description: language === 'hi' ? 'छवि का विश्लेषण करने में विफल।' :
+          language === 'ta' ? 'படத்தை பகுப்பாய்வு செய்வதில் தோல்வி.' :
+            'Failed to analyze the image. Please try again.',
         variant: "destructive",
       });
-      setIsLoading(false);
+
+      // Add error message
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        content: language === 'hi' ? '⚠️ छवि का विश्लेषण करने में त्रुटि हुई। कृपया पुनः प्रयास करें।' :
+          language === 'ta' ? '⚠️ படத்தை பகுப்பாய்வு செய்வதில் பிழை. மீண்டும் முயற்சிக்கவும்.' :
+            '⚠️ Error analyzing image. Please try again.',
+        sender: 'bot',
+        timestamp: new Date(),
+        type: 'text',
+      };
+      setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsUploadingImage(false);
+      setIsLoading(false);
     }
   };
 
@@ -542,6 +489,7 @@ Keep the response practical, actionable, and under 300 words.`;
     }
   };
 
+  // Handle sending text message - uses Supabase chat-assistant function
   const handleSendMessage = async () => {
     if (!newMessage.trim()) return;
 
@@ -560,96 +508,30 @@ Keep the response practical, actionable, and under 300 words.`;
 
     try {
       let weatherData = null;
-      
+
       // Check if the message is weather-related
       if (containsWeatherKeyword(currentMessage)) {
-        try {
-          weatherData = await fetchWeatherData();
-          console.log('Weather data fetched:', weatherData);
-        } catch (weatherError) {
-          console.error('Weather fetch error:', weatherError);
-          // Continue without weather data
-        }
+        weatherData = await fetchWeatherData();
       }
 
-      // Build a short rolling history (last 6 messages, excluding images for now)
-      const recentHistory = messages
-        .filter(m => m.type === 'text') // Only include text messages in history
-        .slice(-6)
-        .map(m => ({
-          role: m.sender === 'user' ? 'user' : 'assistant',
-          content: m.content
-        }));
-
-      // Enhanced prompt for weather-related queries
-      let enhancedMessage = currentMessage;
-      if (weatherData) {
-        const weatherContext = `Current weather in ${farmerData?.location || 'your location'}: 
-        Temperature: ${weatherData.current.temperature}°C, 
-        Humidity: ${weatherData.current.humidity}%, 
-        Condition: ${weatherData.current.condition}, 
-        Wind Speed: ${weatherData.current.windSpeed} km/h
-        ${weatherData.current.rainfall > 0 ? `, Rainfall: ${weatherData.current.rainfall}mm` : ''}
-        
-        User's question: ${currentMessage}`;
-        
-        enhancedMessage = weatherContext;
-      }
-
-      // Call Mistral AI directly
-      const mistralApiKey = import.meta.env.VITE_MISTRAL_API_KEY;
-      
-      if (!mistralApiKey) {
-        throw new Error('Mistral API key not configured');
-      }
-
-      // Create system prompt
-      const systemPrompt = `You are Krishi AI, an expert agricultural assistant for India.
-
-      Farmer profile (use to personalize):
-      - Name: ${farmerData?.name || 'Unknown'}
-      - Location: ${farmerData?.location || 'Unknown'}
-      - Crops: ${farmerData?.crops?.join(', ') || 'Unknown'}
-      - Land size: ${farmerData?.landSize || 'Unknown'} ${farmerData?.landUnit || ''}
-
-      Response rules:
-      - Language: ${language === 'hi' ? 'Hindi' : language === 'ta' ? 'Tamil' : 'English'}
-      - Start with a one-line summary tailored to the farmer
-      - Then give 4–6 short bullet points, each actionable and location-aware
-      - Bold key crop names like **Rice**, **Sugarcane**, etc.
-      - Include specific next step(s) and quantities if relevant
-      - If critical info is missing (e.g., season, irrigation), ask up to 2 targeted questions at the end
-      - Keep the entire answer under 180 words
-      - Avoid generic textbook explanations; prioritize practical, local guidance for ${farmerData?.location || 'their area'}`;
-
-      // Build messages for Mistral API
-      const apiMessages = [
-        { role: 'system', content: systemPrompt },
-        ...recentHistory,
-        { role: 'user', content: enhancedMessage }
-      ];
-
-      const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${mistralApiKey}`,
-          'Content-Type': 'application/json',
+      // Call Supabase chat-assistant function (uses Gemini with Mistral fallback)
+      const { data, error } = await supabase.functions.invoke('chat-assistant', {
+        body: {
+          message: currentMessage,
+          language: language,
+          farmerData: farmerData,
+          history: chatHistory.slice(-10), // Send last 10 messages for context
         },
-        body: JSON.stringify({
-          model: 'mistral-small',
-          messages: apiMessages,
-          max_tokens: 250,
-          temperature: 0.3,
-        }),
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Mistral API error: ${response.status} - ${errorText}`);
+      if (error) {
+        throw error;
       }
 
-      const result = await response.json();
-      const assistantResponse = result.choices?.[0]?.message?.content || 'Sorry, I could not generate a response.';
+      const assistantResponse = data?.response ||
+        (language === 'hi' ? 'क्षमा करें, जवाब देने में समस्या हुई।' :
+          language === 'ta' ? 'மன்னிக்கவும், பதிலளிப்பதில் சிக்கல்.' :
+            'Sorry, there was an issue generating a response.');
 
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -661,6 +543,17 @@ Keep the response practical, actionable, and under 300 words.`;
       };
 
       setMessages(prev => [...prev, botMessage]);
+
+      // Update chat history for context
+      setChatHistory(prev => [
+        ...prev,
+        { role: 'user', content: currentMessage },
+        { role: 'assistant', content: assistantResponse }
+      ]);
+
+      // OPTIONAL: Auto-speak the response if user used voice?
+      // For now, let's keep it manual to avoid annoyance.
+
     } catch (error) {
       console.error('Chat error:', error);
       toast({
@@ -668,41 +561,25 @@ Keep the response practical, actionable, and under 300 words.`;
         description: t('chat.error'),
         variant: "destructive",
       });
-      
-      // Fallback to mock response with weather data if available
-      const responses = mockResponses[language as keyof typeof mockResponses] || mockResponses.en;
-      let fallbackResponse = responses[Math.floor(Math.random() * responses.length)];
-      
-      // If it was a weather query, try to provide weather data even in fallback
-      let weatherData = null;
-      if (containsWeatherKeyword(currentMessage)) {
-        try {
-          weatherData = await fetchWeatherData();
-          fallbackResponse = language === 'hi' ? 
-            "यहाँ आपके क्षेत्र का मौसम डेटा है। कृषि कार्य की योजना बनाने के लिए इसका उपयोग करें।" :
-            language === 'ta' ?
-            "இங்கே உங்கள் பகுதியின் வானிலை தரவு உள்ளது. விவசாய நடவடிக்கைகளை திட்டமிட இதைப் பயன்படுத்தவும்." :
-            "Here's the weather data for your area. Use this to plan your agricultural activities.";
-        } catch (weatherError) {
-          console.error('Weather fallback error:', weatherError);
-        }
-      }
-      
-      const botMessage: Message = {
+
+      // Fallback message
+      const fallbackMessage: Message = {
         id: (Date.now() + 1).toString(),
-        content: `⚠️ ${fallbackResponse} (Offline mode)`,
+        content: language === 'hi'
+          ? `⚠️ नमस्ते ${farmerData?.name || 'किसान'} जी! AI सेवा अस्थायी रूप से व्यस्त है। कृपया कुछ समय बाद पुनः प्रयास करें।`
+          : language === 'ta'
+            ? `⚠️ வணக்கம் ${farmerData?.name || 'விவசாயி'}! AI சேவை தற்காலிகமாக பிஸியாக உள்ளது. மீண்டும் முயற்சிக்கவும்.`
+            : `⚠️ Hello ${farmerData?.name || 'Farmer'}! The AI service is temporarily busy. Please try again in a moment.`,
         sender: 'bot',
         timestamp: new Date(),
-        type: weatherData ? 'weather' : 'text',
-        weatherData: weatherData,
+        type: 'text',
       };
 
-      setMessages(prev => [...prev, botMessage]);
+      setMessages(prev => [...prev, fallbackMessage]);
     } finally {
       setIsLoading(false);
     }
   };
-
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -717,7 +594,10 @@ Keep the response practical, actionable, and under 300 words.`;
         <CardTitle className="flex items-center gap-2 text-primary">
           <Bot className="h-5 w-5" />
           {t('chat.title')}
-          <Cloud className="h-4 w-4 text-blue-500 ml-auto" title="Weather-enabled" />
+          <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
+            <Cloud className="h-3 w-3 text-blue-500" />
+            AI-Powered
+          </span>
         </CardTitle>
       </CardHeader>
       <CardContent className="flex-1 flex flex-col p-0 bg-card">
@@ -727,9 +607,8 @@ Keep the response practical, actionable, and under 300 words.`;
             {messages.map((message) => (
               <div
                 key={message.id}
-                className={`flex gap-3 ${
-                  message.sender === 'user' ? 'justify-end' : 'justify-start'
-                }`}
+                className={`flex gap-3 ${message.sender === 'user' ? 'justify-end' : 'justify-start'
+                  }`}
               >
                 {message.sender === 'bot' && (
                   <Avatar className="h-8 w-8">
@@ -738,20 +617,19 @@ Keep the response practical, actionable, and under 300 words.`;
                     </AvatarFallback>
                   </Avatar>
                 )}
-                
+
                 <div
-                  className={`max-w-[75%] rounded-lg px-3 py-2 ${
-                    message.sender === 'user'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-card text-foreground border border-border shadow-sm'
-                  }`}
+                  className={`max-w-[75%] rounded-lg px-3 py-2 ${message.sender === 'user'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-card text-foreground border border-border shadow-sm'
+                    }`}
                 >
                   <div className="text-sm">
                     {message.type === 'image' && message.imageUrl ? (
                       <div className="space-y-2">
-                        <img 
-                          src={message.imageUrl} 
-                          alt="Uploaded image" 
+                        <img
+                          src={message.imageUrl}
+                          alt="Uploaded image"
                           className="max-w-full h-auto rounded-md max-h-48 object-contain"
                         />
                         <p className="text-xs opacity-75">{t('chat.imageUploaded')}</p>
@@ -763,13 +641,13 @@ Keep the response practical, actionable, and under 300 words.`;
                     )}
                   </div>
                   <span className="text-xs opacity-70 mt-1 block">
-                    {message.timestamp.toLocaleTimeString([], { 
-                      hour: '2-digit', 
-                      minute: '2-digit' 
+                    {message.timestamp.toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit'
                     })}
                   </span>
                 </div>
-                
+
                 {message.sender === 'user' && (
                   <Avatar className="h-8 w-8">
                     <AvatarFallback className="bg-accent text-accent-foreground">
@@ -779,7 +657,7 @@ Keep the response practical, actionable, and under 300 words.`;
                 )}
               </div>
             ))}
-            
+
             {(isLoading || isUploadingImage) && (
               <div className="flex gap-3 justify-start">
                 <Avatar className="h-8 w-8">
@@ -790,13 +668,13 @@ Keep the response practical, actionable, and under 300 words.`;
                 <div className="bg-card text-foreground border border-border rounded-lg px-3 py-2 shadow-sm">
                   <div className="flex gap-1 items-center">
                     <div className="w-2 h-2 bg-primary rounded-full animate-bounce"></div>
-                    <div className="w-2 h-2 bg-primary rounded-full animate-bounce delay-100"></div>
-                    <div className="w-2 h-2 bg-primary rounded-full animate-bounce delay-200"></div>
-                    {isUploadingImage && (
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        {t('chat.analyzingImage')}
-                      </span>
-                    )}
+                    <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                    <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {isUploadingImage
+                        ? (language === 'hi' ? 'छवि का विश्लेषण...' : language === 'ta' ? 'படத்தை பகுப்பாய்வு...' : 'Analyzing image...')
+                        : (language === 'hi' ? 'सोच रहा हूँ...' : language === 'ta' ? 'சிந்திக்கிறேன்...' : 'Thinking...')}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -808,12 +686,23 @@ Keep the response practical, actionable, and under 300 words.`;
         {/* Input Area */}
         <div className="border-t border-border p-4 bg-card">
           <div className="flex gap-2">
+            {/* Mic Button */}
+            <Button
+              variant={isListening ? "destructive" : "secondary"}
+              size="icon"
+              onClick={toggleListening}
+              className={`shrink-0 ${isListening ? 'animate-pulse' : ''}`}
+              title={isListening ? "Stop listening" : "Speak"}
+            >
+              {isListening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+            </Button>
+
             <div className="flex-1 flex gap-2">
               <Input
                 value={newMessage}
                 onChange={(e) => setNewMessage(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder={t('chat.placeholder') + ' (' + t('chat.tryWeather') + ')'}
+                placeholder={isListening ? (language === 'hi' ? 'सुन रहा हूँ...' : 'Listening...') : (t('chat.placeholder') + ' (' + t('chat.tryWeather') + ')')}
                 className="flex-1"
                 disabled={isLoading || isUploadingImage}
               />
@@ -829,7 +718,7 @@ Keep the response practical, actionable, and under 300 words.`;
                 size="icon"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isLoading || isUploadingImage}
-                title="Upload image"
+                title={language === 'hi' ? 'छवि अपलोड करें' : language === 'ta' ? 'படத்தைப் பதிவேற்றவும்' : 'Upload image'}
               >
                 <Image className="h-4 w-4" />
               </Button>

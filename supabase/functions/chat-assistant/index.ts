@@ -6,50 +6,69 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+// Get current season based on month (Indian agricultural seasons)
+const getCurrentSeason = (): string => {
+  const month = new Date().getMonth() + 1;
+  if (month >= 6 && month <= 9) return 'Kharif (Monsoon)';
+  if (month >= 10 || month <= 2) return 'Rabi (Winter)';
+  return 'Zaid (Summer)';
+};
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const { message, language, farmerData, debug, provider, history } = await req.json();
+    const { message, language, farmerData, debug, history } = await req.json();
 
     if (!message) {
       throw new Error('Message is required');
     }
 
+    const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
     const mistralApiKey = Deno.env.get('MISTRAL_API_KEY');
-    const preferProvider = (provider || '').toLowerCase();
+    const currentSeason = getCurrentSeason();
 
-    // Create context for agricultural assistant with strict response style
-    const systemPrompt = `You are Krishi AI, an expert agricultural assistant for India.
+    console.log('API Keys status - Gemini:', !!geminiApiKey, 'Mistral:', !!mistralApiKey);
 
-    Farmer profile (use to personalize):
-    - Name: ${farmerData?.name || 'Unknown'}
-    - Location: ${farmerData?.location || 'Unknown'}
-    - Crops: ${farmerData?.crops?.join(', ') || 'Unknown'}
-    - Land size: ${farmerData?.landSize || 'Unknown'} ${farmerData?.landUnit || ''}
+    // Enhanced personalization prompt
+    const systemPrompt = `You are Krishi Sahayak AI (कृषि सहायक), a trusted and friendly agricultural advisor for Indian farmers.
 
-    Response rules:
-    - Language: ${language === 'hi' ? 'Hindi' : language === 'ta' ? 'Tamil' : 'English'}
-    - Start with a one-line summary tailored to the farmer
-    - Then give 4–6 short bullet points, each actionable and location-aware
-    - Bold key crop names like **Rice**, **Sugarcane**, etc.
-    - Include specific next step(s) and quantities if relevant
-    - If critical info is missing (e.g., season, irrigation), ask up to 2 targeted questions at the end
-    - Keep the entire answer under 180 words
-    - Avoid generic textbook explanations; prioritize practical, local guidance for ${farmerData?.location || 'their area'}`;
+FARMER PROFILE:
+- Name: ${farmerData?.name || 'Farmer'}
+- Location: ${farmerData?.location || 'India'} (consider local climate, soil type, and nearby markets)
+- Crops: ${farmerData?.crops?.join(', ') || 'General farming'}
+- Land Size: ${farmerData?.landSize || 'Not specified'} ${farmerData?.landUnit || ''}
+- Current Season: ${currentSeason}
+- Today's Date: ${new Date().toLocaleDateString('en-IN')}
 
-    // helper: build fallback message
-    const buildFallback = () => (
-      language === 'hi' 
-        ? `नमस्ते! मैं आपका कृषि सहायक हूँ। वर्तमान में AI सेवा अस्थायी रूप से अनुपलब्ध है। कृपया बाद में पुनः प्रयास करें। इस बीच, मौसम और बाजार की जानकारी के लिए ऊपर दिए गए विकल्पों का उपयोग करें।`
-        : language === 'ta'
-        ? `வணக்கம்! நான் உங்கள் விவசாய உதவியாளர். தற்போது AI சேவை தற்காலிகமாக கிடைக்கவில்லை. தயவுசெய்து பின்னர் மீண்டும் முயற்சிக்கவும். இதற்கிடையில், வானிலை மற்றும் சந்தை தகவலுக்கு மேலே உள்ள விருப்பங்களைப் பயன்படுத்தவும்.`
-        : `Hello! I'm your agricultural assistant. The AI service is temporarily unavailable due to high demand. Please try again later. In the meantime, you can use the weather and market price widgets above for important farming information.`
-    );
+PERSONALIZATION RULES:
+1. Always greet by name: "${language === 'hi' ? `नमस्ते ${farmerData?.name || 'किसान'} जी` : language === 'ta' ? `வணக்கம் ${farmerData?.name || 'விவசாயி'}` : `Hello ${farmerData?.name || 'Farmer'}`}"
+2. Reference their specific crops (${farmerData?.crops?.join(', ') || 'their crops'}) in advice
+3. Consider ${farmerData?.location || 'their region'}'s climate and soil conditions
+4. Provide advice relevant to ${currentSeason} season
 
-    // fetch live context if we have coordinates/location
+RESPONSE FORMAT:
+- Language: ${language === 'hi' ? 'Hindi (हिंदी)' : language === 'ta' ? 'Tamil (தமிழ்)' : 'English'}
+- Start with personalized greeting using farmer's name
+- Give 3-5 actionable bullet points with specific quantities when relevant (e.g., "50kg urea per acre")
+- Include timing advice (e.g., "water early morning", "spray in evening")
+- Bold important terms using **bold**
+- If asking about diseases/pests, provide immediate treatment + prevention
+- End with encouraging words
+- Keep response under 180 words
+
+EXPERTISE AREAS:
+- Crop diseases and pest identification
+- Fertilizer recommendations with dosage
+- Irrigation and water management  
+- Weather-based farming advice
+- Market prices and selling strategies
+- Government schemes for farmers
+- Organic farming practices`;
+
+    // Fetch live context if we have coordinates/location
     let weatherSummary = '';
     let marketSummary = '';
     try {
@@ -64,7 +83,7 @@ serve(async (req) => {
           const w = await weatherResp.json();
           const c = w?.weather?.current;
           if (c) {
-            weatherSummary = `Weather: ${c.condition}, ${c.temperature}°C, humidity ${c.humidity}%, wind ${c.windSpeed} km/h, rainfall ${c.rainfall}mm.`;
+            weatherSummary = `Current Weather: ${c.condition}, ${c.temperature}°C, humidity ${c.humidity}%, wind ${c.windSpeed} km/h${c.rainfall > 0 ? `, rainfall ${c.rainfall}mm` : ''}.`;
           }
         }
       }
@@ -78,7 +97,7 @@ serve(async (req) => {
           const m = await marketResp.json();
           const top = m?.marketData?.[0];
           if (top) {
-            marketSummary = `Market (${m.state}): ${top.crop} ₹${top.currentPrice}/q (${top.change}, ${top.trend}).`;
+            marketSummary = `Market Update (${m.state}): ${top.crop} ₹${top.currentPrice}/quintal (${top.change}, ${top.trend}).`;
           }
         }
       }
@@ -86,29 +105,113 @@ serve(async (req) => {
       // Swallow context errors silently; chat will still work
     }
 
-    // helper for Mistral AI provider
-    const callMistral = async (): Promise<{ ok: boolean; content?: string; status?: number; body?: string; }> => {
+    // Build context message
+    const contextInfo = [weatherSummary, marketSummary].filter(Boolean).join('\n');
+    const userMessageWithContext = contextInfo
+      ? `${contextInfo}\n\nFarmer's Question: ${message}`
+      : `Farmer's Question: ${message}`;
+
+    // Helper: Build fallback message
+    const buildFallback = () => (
+      language === 'hi'
+        ? `नमस्ते ${farmerData?.name || 'किसान'} जी! मैं आपका कृषि सहायक हूँ। वर्तमान में AI सेवा व्यस्त है। कृपया कुछ समय बाद पुनः प्रयास करें। इस बीच, मौसम और बाजार विजेट का उपयोग करें।`
+        : language === 'ta'
+          ? `வணக்கம் ${farmerData?.name || 'விவசாயி'}! நான் உங்கள் விவசாய உதவியாளர். AI சேவை தற்போது பிஸியாக உள்ளது. சிறிது நேரம் கழித்து மீண்டும் முயற்சிக்கவும்.`
+          : `Hello ${farmerData?.name || 'Farmer'}! I'm your agricultural assistant. The AI service is currently busy. Please try again in a moment.`
+    );
+
+    // Gemini AI call using REST API (Primary)
+    const callGemini = async (): Promise<{ ok: boolean; content?: string; error?: string }> => {
+      if (!geminiApiKey) {
+        console.error('GEMINI_API_KEY is missing');
+        return { ok: false, error: 'GEMINI_API_KEY missing' };
+      }
+
+      try {
+        console.log('Calling Gemini AI via REST API...');
+
+        // Build conversation for Gemini
+        const contents = [
+          {
+            role: 'user',
+            parts: [{ text: 'You are Krishi Sahayak AI. Here is your system instruction:\n\n' + systemPrompt }]
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Understood! I am Krishi Sahayak AI, ready to help farmers with personalized agricultural advice.' }]
+          }
+        ];
+
+        // Add history if available
+        if (Array.isArray(history)) {
+          for (const h of history) {
+            contents.push({
+              role: h.role === 'assistant' ? 'model' : 'user',
+              parts: [{ text: h.content }]
+            });
+          }
+        }
+
+        // Add current message
+        contents.push({
+          role: 'user',
+          parts: [{ text: userMessageWithContext }]
+        });
+
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              contents: contents,
+              generationConfig: {
+                maxOutputTokens: 300,
+                temperature: 0.4,
+              },
+            }),
+          }
+        );
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error('Gemini API error:', response.status, errorText);
+          return { ok: false, error: `Gemini API error: ${response.status} - ${errorText}` };
+        }
+
+        const data = await response.json();
+        const content = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+        if (!content) {
+          console.error('Gemini returned empty content:', JSON.stringify(data));
+          return { ok: false, error: 'Empty response from Gemini' };
+        }
+
+        console.log('Gemini response received successfully');
+        return { ok: true, content };
+      } catch (error) {
+        console.error('Gemini API error:', error);
+        return { ok: false, error: error.message };
+      }
+    };
+
+    // Mistral AI call (Fallback)
+    const callMistral = async (): Promise<{ ok: boolean; content?: string; error?: string }> => {
       if (!mistralApiKey) {
         console.error('MISTRAL_API_KEY is missing');
-        return { ok: false, status: 401, body: 'MISTRAL_API_KEY missing' };
+        return { ok: false, error: 'MISTRAL_API_KEY missing' };
       }
-      
-      console.log('Calling Mistral AI with message');
-      
+
+      console.log('Calling Mistral AI (fallback)...');
+
       try {
-        // Build messages array for Mistral API
         const messages = [
           { role: 'system', content: systemPrompt },
           ...(Array.isArray(history) ? history : []),
-          { role: 'user', content: `${weatherSummary}\n${marketSummary}\n\nUser: ${message}` }
+          { role: 'user', content: userMessageWithContext }
         ];
-
-        console.log('Mistral API request payload:', {
-          model: 'mistral-small',
-          messages: messages.length,
-          max_tokens: 250,
-          temperature: 0.3,
-        });
 
         const resp = await fetch('https://api.mistral.ai/v1/chat/completions', {
           method: 'POST',
@@ -119,81 +222,75 @@ serve(async (req) => {
           body: JSON.stringify({
             model: 'mistral-small',
             messages: messages,
-            max_tokens: 250,
-            temperature: 0.3,
+            max_tokens: 300,
+            temperature: 0.4,
           }),
         });
-        
-        console.log('Mistral API response status:', resp.status);
-        
+
         if (!resp.ok) {
           const txt = await resp.text();
           console.error('Mistral API error:', resp.status, txt);
-          return { ok: false, status: resp.status, body: txt };
+          return { ok: false, error: txt };
         }
-        
+
         const json = await resp.json();
-        console.log('Mistral API response received successfully');
         const content = json.choices?.[0]?.message?.content ?? '';
+        console.log('Mistral response received successfully');
         return { ok: true, content };
       } catch (error) {
         console.error('Error calling Mistral API:', error);
-        return { ok: false, status: 500, body: `Mistral API call failed: ${error.message}` };
+        return { ok: false, error: error.message };
       }
     };
 
-    // Use Mistral AI as the primary provider
-    let result: { ok: boolean; content?: string; status?: number; body?: string; } | null = null;
-    result = await callMistral();
+    // Try Gemini first, then fallback to Mistral
+    let result = await callGemini();
+    let usedProvider = 'gemini';
+    let geminiError = result.ok ? null : result.error;
 
-    if (!result || !result.ok) {
-      const status = result?.status ?? 500;
-      const body = result?.body ?? 'Unknown provider error';
-      
-      // Provide a graceful fallback for any non-OK response (incl. 400/401/404/429)
-      const fallbackResponse = buildFallback();
+    if (!result.ok) {
+      console.log('Gemini failed with error:', result.error);
+      console.log('Trying Mistral fallback...');
+      result = await callMistral();
+      usedProvider = 'mistral';
+    }
 
-      // If debug flag passed, surface error details with non-200 for easier diagnostics
+    if (!result.ok) {
+      // Both providers failed
+      console.error('Both AI providers failed. Gemini error:', geminiError, 'Mistral error:', result.error);
+
       if (debug) {
-        return new Response(JSON.stringify({ 
+        return new Response(JSON.stringify({
           status: 'error',
-          error: 'Mistral AI request failed',
-          errorDetails: {
-            status,
-            body
-          }
+          error: 'All AI providers failed',
+          geminiError: geminiError,
+          mistralError: result.error,
         }), {
           status: 502,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
 
-      return new Response(JSON.stringify({ 
-        response: fallbackResponse,
+      return new Response(JSON.stringify({
+        response: buildFallback(),
         status: 'success',
         fallback: true,
-        errorDetails: {
-          status,
-          body
-        }
       }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    const assistantResponse = result.content ?? '';
-    console.log('AI response received');
-
-    return new Response(JSON.stringify({ 
-      response: assistantResponse,
-      status: 'success' 
+    return new Response(JSON.stringify({
+      response: result.content,
+      status: 'success',
+      provider: usedProvider,
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
 
   } catch (error) {
     console.error('Error in chat-assistant function:', error);
-    return new Response(JSON.stringify({ 
+    return new Response(JSON.stringify({
       error: error.message,
       status: 'error'
     }), {
